@@ -4,7 +4,7 @@
 
 1 episode is enough for evaluation.
 
-But if set to 2 or more the planner will switch to a more conservative strategy after failure.
+But if set to 2 or more the planner will switch to a more conservative strategy after failure. (Our setting)
 
 ## Command Line for Evaluation
 
@@ -23,3 +23,8 @@ But if set to 2 or more the planner will switch to a more conservative strategy 
 1. A sampling-based intermediate path point inserting policy
 2. Minimun snap trajectory generation
 3. LSTM (Long short-term memory) network for quartotor real mass estimation
+   
+## Tested Platform
+
+1. Windows 10 Enterprise with python 3.8.13
+2. Ubuntu 18.04 LTS with python 3.8.13
