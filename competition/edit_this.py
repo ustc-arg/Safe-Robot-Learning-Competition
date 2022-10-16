@@ -41,10 +41,17 @@ except ImportError:
 # Optionally, create and import modules you wrote.
 # Please refrain from importing large or unstable 3rd party packages.
 try:
-    import example_custom_utils as ecu
+    from parameters.get_params import ParamAssign
+    from trajectory_planning.traj_generator import TrajGenerator
+    from trajectory_modify.modifier import Modifier
+    from trajectory_modify.time_strecher import Stretcher
+    from param_identification.identifier import ParamIdentifier
 except ImportError:
-    # PyTest import.
-    from . import example_custom_utils as ecu
+    from .parameters.get_params import ParamAssign
+    from .trajectory_planning.traj_generator import TrajGenerator
+    from .trajectory_modify.modifier import Modifier
+    from .trajectory_modify.time_strecher import Stretcher
+    from .param_identification.identifier import ParamIdentifier
 
 #########################
 # REPLACE THIS (END) ####
@@ -109,51 +116,92 @@ class Controller():
         # REPLACE THIS (START) ##
         #########################
 
-        # Call a function in module `example_custom_utils`.
-        ecu.exampleFunction()
+        # Constraints analysis
+        pos_constraint = {'x':[-3,3], 'y':[-3,3], 'z':[-0.1,2]}
 
-        # Example: hardcode waypoints through the gates.
-        if use_firmware:
-            waypoints = [(self.initial_obs[0], self.initial_obs[2], initial_info["gate_dimensions"]["tall"]["height"])]  # Height is hardcoded scenario knowledge.
+        # Assign different parameters according to difficulty level
+        self.reseed_per_episode = False
+        self.assigner = ParamAssign(initial_info, self.reseed_per_episode)
+        adjustable_params = self.assigner.get_params()
+
+        # Parameter identifier
+        self.nominal_params = [9.8, initial_info['nominal_physical_parameters']['quadrotor_mass'],
+                                initial_info['nominal_physical_parameters']['quadrotor_ixx_inertia'], 
+                                initial_info['nominal_physical_parameters']['quadrotor_iyy_inertia'],
+                                initial_info['nominal_physical_parameters']['quadrotor_izz_inertia']]
+        self.temp_target = np.array([initial_obs[0], initial_obs[2], initial_obs[4], 0., 0., 0., 0., 0., 0., 0.])
+                            # [ref_x, ref_y, ref_z, ref_vx, ref_vy, ref_vz, ref_ax, ref_ay, ref_az, ref_yaw]
+        self.identifier = ParamIdentifier(self.CTRL_TIMESTEP, self.nominal_params)
+
+        # Trajectory planning
+        self.takeoff_flag = False
+        if 'obstacles' in initial_info['gates_and_obs_randomization']:
+            robust_radius = max(abs(initial_info['gates_and_obs_randomization']['obstacles'].high),
+                                abs(initial_info['gates_and_obs_randomization']['obstacles'].low))
         else:
-            waypoints = [(self.initial_obs[0], self.initial_obs[2], self.initial_obs[4])]
-        for idx, g in enumerate(self.NOMINAL_GATES):
-            height = initial_info["gate_dimensions"]["tall"]["height"] if g[6] == 0 else initial_info["gate_dimensions"]["low"]["height"]
-            if g[5] > 0.75 or g[5] < 0:
-                if idx == 2:  # Hardcoded scenario knowledge (direction in which to take gate 2).
-                    waypoints.append((g[0]+0.3, g[1]-0.3, height))
-                    waypoints.append((g[0]-0.3, g[1]-0.3, height))
-                else:
-                    waypoints.append((g[0]-0.3, g[1], height))
-                    waypoints.append((g[0]+0.3, g[1], height))
-            else:
-                if idx == 3:  # Hardcoded scenario knowledge (correct how to take gate 3).
-                    waypoints.append((g[0]+0.1, g[1]-0.3, height))
-                    waypoints.append((g[0]+0.1, g[1]+0.3, height))
-                else:
-                    waypoints.append((g[0], g[1]-0.3, height))
-                    waypoints.append((g[0], g[1]+0.3, height))
-        waypoints.append([initial_info["x_reference"][0], initial_info["x_reference"][2], initial_info["x_reference"][4]])
+            robust_radius = 0.
+        obstacle_geo = [initial_info['obstacle_dimensions']['height'], initial_info['obstacle_dimensions']['radius'] + robust_radius]
+        gate_geo = [initial_info['gate_dimensions']['tall']['edge'], 0.05, 0.05]
+        gate_height = [initial_info['gate_dimensions']['tall']['height'], initial_info['gate_dimensions']['low']['height']]
+        
+        start_pos = [initial_obs[0], initial_obs[2], initial_obs[4]]
+        if use_firmware:
+            start_height = np.average(gate_height)
+            start_pos[2] = start_height
+        self.start_pos = start_pos
+        goal_pos = [initial_info["x_reference"][0], initial_info["x_reference"][2], initial_info["x_reference"][4]]
+        self.stop_pos = goal_pos
+        traj_plan_params = {"ctrl_time": initial_info["episode_len_sec"], "ctrl_freq": self.CTRL_FREQ, "gate_sequence_fixed": True,
+                        "start_pos": start_pos, "stop_pos": goal_pos, "max_recursion_num": adjustable_params['max_recursion_num'],
+                        "uav_radius": 0.075, "obstacle_geo": obstacle_geo, "gate_geo": gate_geo, "accuracy": 0.01,
+                        "gate_collide_angle": adjustable_params['gate_collide_angle'], "gate_height": gate_height,
+                        "path_insert_point_dist_min": adjustable_params['path_insert_point_dist_min'],
+                        "gate_waypoint_safe_dist": adjustable_params['gate_waypoint_safe_dist'],
+                        "traj_max_vel": adjustable_params['traj_max_vel'], "traj_gamma": adjustable_params['traj_gamma']}
 
-        # Polynomial fit.
-        self.waypoints = np.array(waypoints)
-        deg = 6
-        t = np.arange(self.waypoints.shape[0])
-        fx = np.poly1d(np.polyfit(t, self.waypoints[:,0], deg))
-        fy = np.poly1d(np.polyfit(t, self.waypoints[:,1], deg))
-        fz = np.poly1d(np.polyfit(t, self.waypoints[:,2], deg))
-        duration = 15
-        t_scaled = np.linspace(t[0], t[-1], int(duration*self.CTRL_FREQ))
-        self.ref_x = fx(t_scaled)
-        self.ref_y = fy(t_scaled)
-        self.ref_z = fz(t_scaled)
+        trajGen = TrajGenerator(traj_plan_params, self.NOMINAL_GATES, self.NOMINAL_OBSTACLES)
+
+        for _ in range(adjustable_params['replan_attempt_num']):
+            flag = trajGen.trajectory_replan()
+            if flag:
+                print("\033[4;33;40mMore attempts on trajectory planning may be needed.\033[0m")
+            else:
+                print("\033[0;37;42mReplanning Done!\033[0m")
+                break
+        
+        generator = trajGen.traj_generator
+        self.waypoints = np.array(trajGen.path)
+        
+        # Trajectory strecher
+        near_edge_flag = min(abs(self.stop_pos[0]-pos_constraint['x'][0]),abs(self.stop_pos[0]-pos_constraint['x'][1]),\
+                            abs(self.stop_pos[1]-pos_constraint['y'][0]),abs(self.stop_pos[1]-pos_constraint['y'][1]),\
+                            abs(self.stop_pos[2]-pos_constraint['z'][0]),abs(self.stop_pos[2]-pos_constraint['z'][1])) <= 0.3
+                            # 0.3 is the maximum overshoot allowed
+        t_scaled = trajGen.timestamp
+        traj_resample_params = {"dt": self.CTRL_TIMESTEP, "time_stretch_horizon": adjustable_params['time_stretch_horizon'], 
+                                "pass_gate_vel": adjustable_params['pass_gate_vel'],"max_vel": adjustable_params['traj_max_vel'],
+                                "time_ahead_bias": adjustable_params['time_ahead_bias'], "add_target_pos": near_edge_flag}
+        self.strecher = Stretcher(t_scaled, trajGen.pos_trajectory, trajGen.gates, traj_resample_params)
+        self.pos_trajectory, self.vel_trajectory, self.acc_trajectory, self.yaw_trajectory = self.strecher.resample(generator)
+        t_scaled = self.strecher.timestamp
+
+        ref_x = self.pos_trajectory[:,0].copy()
+        ref_y = self.pos_trajectory[:,1].copy()
+        ref_z = self.pos_trajectory[:,2].copy()
+
+        # Trajectory modifier
+        modifier_params = {'hold_ratio': adjustable_params['hold_ratio']}
+        self.modifier = Modifier(np.array(self.NOMINAL_GATES)[:,0:2],modifier_params)
+
+        # Save all planning parameters
+        self.param_bucket = {'traj_plan_params': traj_plan_params, 'traj_resample_params': traj_resample_params}
 
         if self.VERBOSE:
             # Plot trajectory in each dimension and 3D.
-            plot_trajectory(t_scaled, self.waypoints, self.ref_x, self.ref_y, self.ref_z)
+            plot_trajectory(t_scaled, self.waypoints, ref_x, ref_y, ref_z)
 
-            # Draw the trajectory on PyBullet's GUI.
-            draw_trajectory(initial_info, self.waypoints, self.ref_x, self.ref_y, self.ref_z)
+        # Draw the trajectory on PyBullet's GUI.
+        draw_trajectory(initial_info, self.waypoints, ref_x, ref_y, ref_z)
 
         #########################
         # REPLACE THIS (END) ####
@@ -194,64 +242,62 @@ class Controller():
         # REPLACE THIS (START) ##
         #########################
 
-        # Handwritten solution for GitHub's getting_stated scenario.
+        takeoff_time = 2.0
+        pos_delta = 0.22 # determine whether or not uav has reached appointed position
+
+        temp_pos = np.array([obs[0], obs[2], obs[4]])
+        temp_att = np.array(obs[6:9])
+
+        if 'current_target_gate_id' in info and 'current_target_gate_pos' in info:
+            next_gate_id = info['current_target_gate_id']
+            next_gate_pos = np.array(info['current_target_gate_pos'][0:2])
+            self.modifier.refresh_gate_info(next_gate_id, next_gate_pos, self.temp_target[0:2])
 
         if iteration == 0:
-            height = 1
-            duration = 2
-
+            self.takeoff_flag = False
+            height = self.start_pos[2]
             command_type = Command(2)  # Take-off.
-            args = [height, duration]
-
-        elif iteration >= 3*self.CTRL_FREQ and iteration < 20*self.CTRL_FREQ:
-            step = min(iteration-3*self.CTRL_FREQ, len(self.ref_x) -1)
-            target_pos = np.array([self.ref_x[step], self.ref_y[step], self.ref_z[step]])
-            target_vel = np.zeros(3)
-            target_acc = np.zeros(3)
-            target_yaw = 0.
-            target_rpy_rates = np.zeros(3)
-
-            command_type = Command(1)  # cmdFullState.
-            args = [target_pos, target_vel, target_acc, target_yaw, target_rpy_rates]
-
-        elif iteration == 20*self.CTRL_FREQ:
-            command_type = Command(6)  # Notify setpoint stop.
-            args = []
-
-        elif iteration == 20*self.CTRL_FREQ+1:
-            x = self.ref_x[-1]
-            y = self.ref_y[-1]
-            z = 1.5 
-            yaw = 0.
-            duration = 2.5
-
-            command_type = Command(5)  # goTo.
-            args = [[x, y, z], yaw, duration, False]
-
-        elif iteration == 23*self.CTRL_FREQ:
-            x = self.initial_obs[0]
-            y = self.initial_obs[2]
-            z = 1.5
-            yaw = 0.
-            duration = 6
-
-            command_type = Command(5)  # goTo.
-            args = [[x, y, z], yaw, duration, False]
-
-        elif iteration == 30*self.CTRL_FREQ:
-            height = 0.
-            duration = 3
-
-            command_type = Command(3)  # Land.
-            args = [height, duration]
-
-        elif iteration == 33*self.CTRL_FREQ-1:
-            command_type = Command(-1)  # Terminate command to be sent once the trajectory is completed.
-            args = []
-
-        else:
+            args = [height, takeoff_time]
+            self.temp_target = np.concatenate((self.start_pos, [0., 0., 0., 0., 0., 0., 0.]))
+        elif self.takeoff_flag is False:
+            if iteration <= takeoff_time*self.CTRL_FREQ or np.linalg.norm(temp_pos - self.start_pos) > pos_delta:
+                self.real_start_iteration = iteration + 1
+            else:
+                self.takeoff_flag = True
             command_type = Command(0)  # None.
             args = []
+        else:
+            step = iteration - self.real_start_iteration
+            if step <= len(self.pos_trajectory) -1:
+                target_pos = self.pos_trajectory[step].copy()
+                target_vel = self.vel_trajectory[step].copy()
+                target_acc = self.acc_trajectory[step].copy()
+                target_yaw = self.yaw_trajectory[step].copy()
+                target_rpy_rates = np.zeros(3)
+
+                target_pos += np.append(self.modifier.get_des_pos_bias(target_pos[0:2]), 0.0)
+                target_acc += self.identifier.reference_signal_bias()
+                
+                command_type = Command(1)  # cmdFullState.
+                args = [target_pos, target_vel, target_acc, target_yaw, target_rpy_rates]
+                self.temp_target = np.concatenate((target_pos, target_vel, target_acc, [target_yaw]))
+            elif step == len(self.pos_trajectory):
+                command_type = Command(6)  # notify setpoint stop.
+                args = []
+            elif step == len(self.pos_trajectory) + 1:
+                command_type = Command(5)  # goTo.
+                args = [self.stop_pos, 0., 2.5, False]
+                self.temp_target = np.concatenate((self.start_pos, [0., 0., 0., 0., 0., 0., 0.]))
+            elif (step - len(self.pos_trajectory)) % (2.5*self.CTRL_FREQ) == 1:
+                command_type = Command(5)  # goTo.
+                args = [self.stop_pos, 0., 2.5, False]
+                self.temp_target = np.concatenate((self.start_pos, [0., 0., 0., 0., 0., 0., 0.]))
+            else:
+                command_type = Command(0)  # None.
+                args = []
+
+        if done:
+            self.takeoff_flag = False
 
         #########################
         # REPLACE THIS (END) ####
@@ -291,10 +337,11 @@ class Controller():
         iteration = int(time*self.CTRL_FREQ)
 
         #########################
-        if iteration < len(self.ref_x):
-            target_p = np.array([self.ref_x[iteration], self.ref_y[iteration], self.ref_z[iteration]])
+        if iteration < self.pos_trajectory.shape[0]:
+            target_p = self.pos_trajectory[iteration].copy()
+            target_p += np.append(self.modifier.get_des_pos_bias(target_p[0:2]), 0.0)
         else:
-            target_p = np.array([self.ref_x[-1], self.ref_y[-1], self.ref_z[-1]])
+            target_p = self.pos_trajectory[-1]
         target_v = np.zeros(3)
         #########################
 
@@ -334,7 +381,7 @@ class Controller():
         # REPLACE THIS (START) ##
         #########################
 
-        pass
+        self.identifier.identify(self.obs_buffer, self.action_buffer, self.temp_target, self.takeoff_flag)
 
         #########################
         # REPLACE THIS (END) ####
@@ -355,11 +402,40 @@ class Controller():
         # REPLACE THIS (START) ##
         #########################
 
-        _ = self.action_buffer
-        _ = self.obs_buffer
-        _ = self.reward_buffer
-        _ = self.done_buffer
-        _ = self.info_buffer
+        self.identifier.reset()
+        self.modifier.reset()
+        
+        if self.info_buffer[-1]['collision'][0] is not None and self.info_buffer[-1]['collision'][1] is True:
+            default_params = self.assigner.get_default_params()
+
+            self.takeoff_flag = False
+            traj_replan_params = self.param_bucket['traj_plan_params']
+            traj_replan_params["max_recursion_num"] = default_params['max_recursion_num']
+            traj_replan_params["gate_collide_angle"] = default_params['gate_collide_angle']
+            traj_replan_params["path_insert_point_dist_min"] = default_params['path_insert_point_dist_min']
+            traj_replan_params["gate_waypoint_safe_dist"] = default_params['gate_waypoint_safe_dist']
+            traj_replan_params["traj_max_vel"] = default_params['traj_max_vel']
+            traj_replan_params["traj_gamma"] = default_params['traj_gamma']
+            trajGen = TrajGenerator(traj_replan_params, self.NOMINAL_GATES, self.NOMINAL_OBSTACLES)
+
+            for _ in range(default_params['replan_attempt_num']):
+                _flag = trajGen.trajectory_replan()
+                if _flag:
+                    print("\033[4;33;40mMore attempts on trajectory planning may be needed.\033[0m")
+                else:
+                    print("\033[0;37;42mReplanning Done!\033[0m")
+                    break
+
+            traj_resample_params = self.param_bucket['traj_resample_params']
+            traj_resample_params["time_stretch_horizon"] = default_params['time_stretch_horizon']
+            traj_resample_params["pass_gate_vel"] = default_params['pass_gate_vel']
+            traj_resample_params["max_vel"] = default_params['traj_max_vel']
+            traj_resample_params["time_ahead_bias"] = default_params['time_ahead_bias']
+            self.strecher = Stretcher(trajGen.timestamp, trajGen.pos_trajectory, trajGen.gates, traj_resample_params)
+            self.pos_trajectory, self.vel_trajectory, self.acc_trajectory, self.yaw_trajectory = self.strecher.resample(trajGen.traj_generator)
+
+            modifier_params = {'hold_ratio': default_params['hold_ratio']}
+            self.modifier = Modifier(np.array(self.NOMINAL_GATES)[:,0:2],modifier_params)
 
         #########################
         # REPLACE THIS (END) ####
