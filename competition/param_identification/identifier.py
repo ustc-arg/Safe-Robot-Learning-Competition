@@ -8,7 +8,7 @@ class ParamIdentifier:
         # nominal_value: [g, m, Ixx, Iyy, Izz]
         self.dt = dt
         self.nominal_value = nominal_value
-        self.mass_model_path = os.path.join(os.path.dirname(__file__), 'log\LSTM_Net_1005\model_v0.pt')
+        self.mass_model_path = os.path.join(os.path.dirname(__file__), 'log/LSTM_Net_1005/model_v0.pt')
         self.mass_model = Mass.PredictNet(model_path=self.mass_model_path, nominal_value=self.nominal_value[1])
         self.temp_acc = np.zeros(3)
     
