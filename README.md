@@ -28,3 +28,15 @@ But if set to 2 or more the planner will switch to a more conservative strategy 
 
 1. Windows 10 Enterprise with python 3.8.13
 2. Ubuntu 18.04 LTS with python 3.8.13
+
+## Team Members
+
+- Di, Jian @dddascend
+- Jin, Tao @Lucaxxx
+- Li, Xiaohan @JesonLeee
+- Zhou, Yijia @RintaClio
+- Liang, Xiuhua @motianxiuhua
+- Zhang, Chenxu @Norton-z
+- Zhang, Kaizheng @iRodinia
+
+You can reach the team leader @iRodinia via [mail](caesarzhang@mail.ustc.edu.cn) for convenience if there is any further question~
