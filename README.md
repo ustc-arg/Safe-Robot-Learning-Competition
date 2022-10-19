@@ -39,4 +39,4 @@ But if set to 2 or more the planner will switch to a more conservative strategy 
 - Zhang, Chenxu @Norton-z
 - Zhang, Kaizheng @iRodinia
 
-You can reach the team leader @iRodinia via [mail](caesarzhang@mail.ustc.edu.cn) for convenience if there is any further question~
+You can reach the team leader @iRodinia via :email:`caesarzhang@mail.ustc.edu.cn` for convenience if there is any further question~
